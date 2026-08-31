@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+  <meta charset="UTF-8">
+  <title>Asktro</title>
+  <style>* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #1a1a2e;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  font-family: 'Courier New', monospace;
+  overflow: hidden;
+}
+
+#gameCanvas {
+  display: block;
+  border: 2px solid #333;
+  background: #0d0d1a;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}</style>
+</head>
+<body>
+  <canvas id="gameCanvas" width="960" height="540"></canvas>
+  <script>const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const TILE_SIZE = 16;
+const WORLD_WIDTH = 5000;
+const WORLD_HEIGHT = 100;
+
+const camera = { x: 0, y: 0 };
+
+const player = {
+  x: 2500 * TILE_SIZE,
+  y: 50 * TILE_SIZE,
+  width: 16,
+  height: 24,
+  vx: 0,
+  vy: 0,
+  speed: 150,
+  jumpForce: 350,
+  onGround: false,
+  ammo: 100,
+  pixels: 0,
+  hp: 100,
+  maxHp: 100,
+  gunDamage: 10,
+  facingRight: true,
+  usePixels: false
+};
+
+const keys = { left: false, right: false, up: false, down: false };
+const mouse = { x: 0, y: 0, down: false, wasDown: false, movementX: 0, movementY: 0 };
+const aimAngle = { x: 1, y: 0 };
+
+let fireCooldown = 0;
+const FIRE_RATE = 1 / 3;
+
+let pointerLocked = false;
+let freeCam = false;
+const lookOffset = { x: 0, y: 0 };
+
+const projectiles = [];
+
+const pickups = [];
+
+const aliens = [];
+const alienProjectiles = [];
+
+const terrain = [];
+const GROUND_LEVEL = 60;
+const BEDROCK_DEPTH = 3;
+
+function generateTerrain() {
+  for (let x = 0; x < WORLD_WIDTH; x++) {
+    terrain[x] = [];
+    let noise = Math.sin(x * 0.3) * 3 + Math.sin(x * 0.1) * 5;
+    const surfaceY = GROUND_LEVEL + Math.floor(noise);
+    
+    for (let y = 0; y < WORLD_HEIGHT; y++) {
+      if (y >= WORLD_HEIGHT - BEDROCK_DEPTH) {
+        terrain[x][y] = { type: 'bedrock', solid: true, indestructible: true };
+      } else if (y >= surfaceY + 10) {
+        terrain[x][y] = { type: 'stone', solid: true };
+      } else if (y >= surfaceY + 2) {
+        terrain[x][y] = { type: 'dirt', solid: true };
+      } else if (y === surfaceY) {
+        terrain[x][y] = { type: 'grass', solid: true };
+      } else if (y === surfaceY + 1) {
+        terrain[x][y] = { type: 'dirt', solid: true };
+      } else {
+        terrain[x][y] = null;
+      }
+    }
+  }
+}
+
+function getTile(x, y) {
+  const tx = Math.floor(x / TILE_SIZE);
+  const ty = Math.floor(y / TILE_SIZE);
+  if (tx < 0 || tx >= WORLD_WIDTH || ty < 0 || ty >= WORLD_HEIGHT) return null;
+  return terrain[tx][ty];
+}
+
+function setTile(x, y, value) {
+  const tx = Math.floor(x / TILE_SIZE);
+  const ty = Math.floor(y / TILE_SIZE);
+  if (tx < 0 || tx >= WORLD_WIDTH || ty < 0 || ty >= WORLD_HEIGHT) return;
+  terrain[tx][ty] = value;
+}
+
+function checkCollision(px, py, pw, ph) {
+  const left = Math.floor(px / TILE_SIZE);
+  const right = Math.floor((px + pw - 1) / TILE_SIZE);
+  const top = Math.floor(py / TILE_SIZE);
+  const bottom = Math.floor((py + ph - 1) / TILE_SIZE);
+
+  for (let tx = left; tx <= right; tx++) {
+    for (let ty = top; ty <= bottom; ty++) {
+      const tile = getTile(tx * TILE_SIZE, ty * TILE_SIZE);
+      if (tile && tile.solid) {
+        return { tx, ty, tile };
+      }
+    }
+  }
+  return null;
+}
+
+function updateCamera() {
+  if (!freeCam) {
+    camera.x = player.x - canvas.width / 2;
+    camera.y = player.y - canvas.height / 2;
+  }
+  
+  camera.x = Math.max(0, Math.min(camera.x, WORLD_WIDTH * TILE_SIZE - canvas.width));
+  camera.y = Math.max(0, Math.min(camera.y, WORLD_HEIGHT * TILE_SIZE - canvas.height));
+}
+
+function update(dt) {
+  if (freeCam) {
+    camera.x = player.x - canvas.width / 2 - lookOffset.x;
+    camera.y = player.y - canvas.height / 2 - lookOffset.y;
+    
+    camera.x = Math.max(0, Math.min(camera.x, WORLD_WIDTH * TILE_SIZE - canvas.width));
+    camera.y = Math.max(0, Math.min(camera.y, WORLD_HEIGHT * TILE_SIZE - canvas.height));
+  } else {
+    if (keys.left) {
+      player.vx = -player.speed;
+      player.facingRight = false;
+    } else if (keys.right) {
+      player.vx = player.speed;
+      player.facingRight = true;
+    } else {
+      player.vx = 0;
+    }
+  
+    if (keys.up && player.onGround) {
+      player.vy = -player.jumpForce;
+      player.onGround = false;
+    }
+  
+    player.vy += 500 * dt;
+  
+    const nextX = player.x + player.vx * dt;
+    const nextY = player.y + player.vy * dt;
+  
+    const colX = checkCollision(nextX, player.y, player.width, player.height);
+    if (colX) {
+      if (player.vx > 0) {
+        player.x = colX.tx * TILE_SIZE - player.width;
+      } else if (player.vx < 0) {
+        player.x = (colX.tx + 1) * TILE_SIZE;
+      }
+      player.vx = 0;
+    } else {
+      player.x = nextX;
+    }
+  
+const wasOnGround = player.onGround;
+    const colY = checkCollision(player.x, nextY, player.width, player.height);
+    if (colY) {
+      if (player.vy > 0) {
+        player.y = colY.ty * TILE_SIZE - player.height;
+        player.vy = 0;
+        player.onGround = true;
+      } else if (player.vy < 0) {
+        player.y = (colY.ty + 1) * TILE_SIZE;
+        player.vy = 0;
+      }
+    } else {
+      player.y = nextY;
+      player.onGround = false;
+    }
+
+    player.x = Math.max(0, Math.min(player.x, WORLD_WIDTH * TILE_SIZE - player.width));
+  
+  }
+  
+  updateCamera();
+  
+  if (!freeCam) {
+    updateAim();
+    handleShooting(dt);
+    updateProjectiles(dt);
+    updatePickups(dt);
+    updateAliens(dt);
+  }
+}
+
+function updateAim() {
+  if (pointerLocked && !freeCam) {
+    const sensitivity = 0.003;
+    let relativeAngle;
+    
+    if (player.facingRight) {
+      relativeAngle = Math.atan2(aimAngle.y, aimAngle.x);
+    } else {
+      relativeAngle = Math.atan2(aimAngle.y, -aimAngle.x);
+    }
+    
+    const verticalInput = mouse.movementY * sensitivity;
+    const newAngle = relativeAngle + verticalInput;
+    
+    const clampedAngle = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newAngle));
+    
+    if (player.facingRight) {
+      aimAngle.x = Math.cos(clampedAngle);
+      aimAngle.y = Math.sin(clampedAngle);
+    } else {
+      aimAngle.x = -Math.cos(clampedAngle);
+      aimAngle.y = Math.sin(clampedAngle);
+    }
+  } else if (!pointerLocked) {
+    const screenCenterX = canvas.width / 2;
+    const screenCenterY = canvas.height / 2;
+    const dx = mouse.x - screenCenterX;
+    const dy = mouse.y - screenCenterY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 0) {
+      aimAngle.x = dx / dist;
+      aimAngle.y = dy / dist;
+    }
+    
+    if (player.facingRight && aimAngle.x < 0) {
+      const angle = Math.atan2(aimAngle.y, aimAngle.x);
+      if (angle < -Math.PI / 2) {
+        aimAngle.x = 0;
+        aimAngle.y = -1;
+      } else {
+        aimAngle.x = 0;
+        aimAngle.y = 1;
+      }
+    } else if (!player.facingRight && aimAngle.x > 0) {
+      const angle = Math.atan2(aimAngle.y, aimAngle.x);
+      if (angle > Math.PI / 2) {
+        aimAngle.x = 0;
+        aimAngle.y = -1;
+      } else {
+        aimAngle.x = 0;
+        aimAngle.y = 1;
+      }
+    }
+  }
+  
+  mouse.movementX = 0;
+  mouse.movementY = 0;
+}
+
+function handleShooting(dt) {
+  const justPressed = mouse.down && !mouse.wasDown;
+  mouse.wasDown = mouse.down;
+  
+  const hasResource = player.usePixels ? player.pixels > 0 : player.ammo > 0;
+  
+  if (justPressed && hasResource) {
+    fireProjectile();
+    fireCooldown = FIRE_RATE;
+  } else if (mouse.down) {
+    fireCooldown -= dt;
+    if (fireCooldown <= 0 && hasResource) {
+      fireProjectile();
+      fireCooldown = FIRE_RATE;
+    }
+  }
+}
+
+function fireProjectile() {
+  const usePixels = player.usePixels;
+  const hadAmmo = player.ammo;
+  const hadPixels = player.pixels;
+  
+  if (usePixels) {
+    if (player.pixels <= 0) return;
+    player.pixels--;
+  } else {
+    if (player.ammo <= 0) return;
+    player.ammo--;
+  }
+  
+  const damage = usePixels ? Math.floor(player.gunDamage * 0.5) : player.gunDamage;
+  
+  const gunOffsetX = player.facingRight ? player.width : -8;
+  const gunOffsetY = 10;
+  
+  const startX = player.x + gunOffsetX;
+  const startY = player.y + gunOffsetY;
+  
+  const speed = 800;
+  
+  projectiles.push({
+    x: startX,
+    y: startY,
+    vx: aimAngle.x * speed,
+    vy: aimAngle.y * speed,
+    damage: damage,
+    isPixel: usePixels,
+    life: 1.0
+  });
+  
+  checkJetpackBoost();
+}
+
+function checkJetpackBoost() {
+  if (aimAngle.y > 0.9) {
+    const boostForce = player.gunDamage * 30;
+    player.vy = -boostForce;
+    player.onGround = false;
+  }
+}
+
+function respawnPlayer() {
+  player.x = 2500 * TILE_SIZE;
+  player.y = 50 * TILE_SIZE;
+  player.vx = 0;
+  player.vy = 0;
+  player.hp = player.maxHp;
+  player.ammo = 100;
+  player.pixels = 0;
+}
+
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    
+    const hit = checkProjectileCollision(p);
+    if (hit || p.life <= 0) {
+      projectiles.splice(i, 1);
+    }
+  }
+}
+
+function checkProjectileCollision(p) {
+  if (checkProjectileAlienCollision(p)) return true;
+  
+  const tx = Math.floor(p.x / TILE_SIZE);
+  const ty = Math.floor(p.y / TILE_SIZE);
+  
+  if (tx >= 0 && tx < WORLD_WIDTH && ty >= 0 && ty < WORLD_HEIGHT) {
+    const tile = terrain[tx][ty];
+    if (tile && tile.solid && !tile.indestructible) {
+      terrain[tx][ty] = null;
+      spawnPixelPickups(p.x, p.y);
+      return true;
+    }
+  }
+  return false;
+}
+
+function spawnPixelPickups(x, y) {
+  const count = 1 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < count; i++) {
+    pickups.push({
+      x: x + (Math.random() - 0.5) * 20,
+      y: y,
+      vx: (Math.random() - 0.5) * 100,
+      vy: -50 - Math.random() * 100,
+      type: 'pixel',
+      life: 10
+    });
+  }
+}
+
+function updatePickups(dt) {
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const p = pickups[i];
+    p.vy += 300 * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    
+    if (p.y > WORLD_HEIGHT * TILE_SIZE) {
+      pickups.splice(i, 1);
+      continue;
+    }
+    
+    const tx = Math.floor(p.x / TILE_SIZE);
+    const ty = Math.floor(p.y / TILE_SIZE);
+    if (tx >= 0 && tx < WORLD_WIDTH && ty >= 0 && ty < WORLD_HEIGHT) {
+      const tile = terrain[tx][ty];
+      if (tile && tile.solid) {
+        p.y = ty * TILE_SIZE;
+        p.vy = 0;
+        p.vx *= 0.5;
+      }
+    }
+    
+    if (p.life <= 0) {
+      pickups.splice(i, 1);
+      continue;
+    }
+    
+    const dx = p.x - (player.x + player.width / 2);
+    const dy = p.y - (player.y + player.height / 2);
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < TILE_SIZE * 5) {
+      if (p.type === 'pixel') player.pixels++;
+      else if (p.type === 'ammo') player.ammo++;
+      pickups.splice(i, 1);
+    }
+  }
+}
+
+function spawnAliens() {
+  for (let i = 0; i < 50; i++) {
+    let attempts = 0;
+    while (attempts < 50) {
+      const x = 50 + Math.random() * (WORLD_WIDTH - 100) * TILE_SIZE;
+      const tx = Math.floor(x / TILE_SIZE);
+      let y = 0;
+      for (let ty = 0; ty < WORLD_HEIGHT; ty++) {
+        const tile = terrain[tx][ty];
+        if (tile && tile.solid) {
+          y = ty * TILE_SIZE - 24;
+          break;
+        }
+      }
+      if (y > 0) {
+        let canSpawn = true;
+        for (const a of aliens) {
+          if (Math.abs(a.x - x) < 200) canSpawn = false;
+        }
+        if (canSpawn) {
+          const isSwordGuy = Math.random() < 0.5;
+          aliens.push({
+            x: x,
+            y: y,
+            width: 16,
+            height: 24,
+            vx: (Math.random() > 0.5 ? 1 : -1) * 40,
+            hp: isSwordGuy ? 50 : 25,
+            maxHp: isSwordGuy ? 50 : 25,
+            moveDir: Math.random() > 0.5 ? 1 : -1,
+            moveTimer: 0,
+            patrolDist: 100 + Math.random() * 100,
+            startX: x,
+            type: isSwordGuy ? 'sword' : 'bow',
+            attackCooldown: 0,
+            facingRight: Math.random() > 0.5
+          });
+          break;
+        }
+      }
+      attempts++;
+    }
+  }
+}
+
+function updateAliens(dt) {
+  const playerTileX = Math.floor(player.x / TILE_SIZE);
+  
+  for (let i = aliens.length - 1; i >= 0; i--) {
+    const a = aliens[i];
+    const alienTileX = Math.floor(a.x / TILE_SIZE);
+    const distTiles = Math.abs(playerTileX - alienTileX);
+    
+    if (distTiles > 100) {
+      aliens.splice(i, 1);
+      continue;
+    }
+    
+    if (a.type === 'sword') {
+      updateSwordAlien(a, dt);
+    } else {
+      updateBowAlien(a, dt);
+    }
+    
+    a.vy = (a.vy || 0) + 500 * dt;
+    const nextY = a.y + (a.vy || 0) * dt;
+    const colY = checkCollision(a.x, nextY, a.width, a.height);
+    if (colY) {
+      if ((a.vy || 0) > 0) {
+        a.y = colY.ty * TILE_SIZE - a.height;
+        a.vy = 0;
+      } else {
+        a.y = (colY.ty + 1) * TILE_SIZE;
+        a.vy = 0;
+      }
+    } else {
+      a.y = nextY;
+    }
+    
+    if (a.hp <= 0) {
+      spawnAlienDrops(a.x, a.y);
+      aliens.splice(i, 1);
+    }
+  }
+  
+  if (aliens.length < 30) {
+    trySpawnAliensNearPlayer();
+  }
+  
+  updateAlienProjectiles(dt);
+}
+
+function trySpawnAliensNearPlayer() {
+  const playerTileX = Math.floor(player.x / TILE_SIZE);
+  const minTileX = Math.max(0, playerTileX - 100);
+  const maxTileX = Math.min(WORLD_WIDTH - 1, playerTileX + 100);
+  
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const tx = minTileX + Math.floor(Math.random() * (maxTileX - minTileX));
+    
+    let groundY = 0;
+    for (let ty = 0; ty < WORLD_HEIGHT; ty++) {
+      const tile = terrain[tx][ty];
+      if (tile && tile.solid) {
+        groundY = ty * TILE_SIZE - 24;
+        break;
+      }
+    }
+    
+    if (groundY === 0) continue;
+    
+    const distTiles = Math.abs(tx - playerTileX);
+    if (distTiles < 50) continue;
+    
+    let canSpawn = true;
+    for (const a of aliens) {
+      if (Math.abs(a.x - tx * TILE_SIZE) < 100) {
+        canSpawn = false;
+        break;
+      }
+    }
+    
+    if (canSpawn) {
+      const isSwordGuy = Math.random() < 0.5;
+      aliens.push({
+        x: tx * TILE_SIZE,
+        y: groundY,
+        width: 16,
+        height: 24,
+        vx: (Math.random() > 0.5 ? 1 : -1) * 40,
+        hp: isSwordGuy ? 50 : 25,
+        maxHp: isSwordGuy ? 50 : 25,
+        moveDir: Math.random() > 0.5 ? 1 : -1,
+        moveTimer: 0,
+        patrolDist: 100 + Math.random() * 100,
+        startX: tx * TILE_SIZE,
+        type: isSwordGuy ? 'sword' : 'bow',
+        attackCooldown: 0,
+        facingRight: Math.random() > 0.5
+      });
+    }
+  }
+}
+
+function updateSwordAlien(a, dt) {
+  const dx = player.x - a.x;
+  const dist = Math.abs(dx);
+  
+  if (dist < 300) {
+    a.moveDir = dx > 0 ? 1 : -1;
+    a.facingRight = dx > 0;
+    a.moveTimer = 0;
+  } else {
+    a.moveTimer += dt;
+    if (a.moveTimer > 3) {
+      a.moveDir *= -1;
+      a.facingRight = a.moveDir > 0;
+      a.moveTimer = 0;
+    }
+  }
+  
+  const nextX = a.x + a.vx * a.moveDir * dt;
+  const col = checkCollision(nextX, a.y, a.width, a.height);
+  if (col || Math.abs(nextX - a.startX) > a.patrolDist * 2) {
+    a.moveDir *= -1;
+    a.facingRight = a.moveDir > 0;
+    a.moveTimer = 0;
+  } else {
+    a.x = nextX;
+  }
+  
+  if (dist < 20 && Math.abs(player.y - a.y) < 20) {
+    if (a.attackCooldown <= 0) {
+      player.hp = Math.max(0, player.hp - 10);
+      a.attackCooldown = 1.0;
+      if (player.hp <= 0) respawnPlayer();
+    }
+  }
+  if (a.attackCooldown > 0) a.attackCooldown -= dt;
+}
+
+function updateBowAlien(a, dt) {
+  const dx = player.x - a.x;
+  const dy = player.y - a.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  
+  a.facingRight = dx > 0;
+  
+  if (dist < 400) {
+    a.moveDir = Math.abs(dx) > 100 ? (dx > 0 ? 1 : -1) : 0;
+    
+    if (a.attackCooldown <= 0 && dist < 350) {
+      const angle = Math.atan2(dy, dx);
+      const speed = 300;
+      alienProjectiles.push({
+        x: a.x + (a.facingRight ? a.width : -4),
+        y: a.y + 12,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        damage: 8,
+        life: 3
+      });
+      a.attackCooldown = 2.0;
+    }
+  } else {
+    a.moveTimer += dt;
+    if (a.moveTimer > 3) {
+      a.moveDir *= -1;
+      a.moveTimer = 0;
+    }
+  }
+  
+  if (a.moveDir !== 0) {
+    const nextX = a.x + a.vx * a.moveDir * dt;
+    const col = checkCollision(nextX, a.y, a.width, a.height);
+    if (col || Math.abs(nextX - a.startX) > a.patrolDist) {
+      a.moveDir *= -1;
+      a.moveTimer = 0;
+    } else {
+      a.x = nextX;
+    }
+  }
+  
+  if (a.attackCooldown > 0) a.attackCooldown -= dt;
+}
+
+function updateAlienProjectiles(dt) {
+  for (let i = alienProjectiles.length - 1; i >= 0; i--) {
+    const p = alienProjectiles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt;
+    
+    if (p.x >= player.x && p.x <= player.x + player.width &&
+        p.y >= player.y && p.y <= player.y + player.height) {
+      player.hp = Math.max(0, player.hp - p.damage);
+      alienProjectiles.splice(i, 1);
+      if (player.hp <= 0) respawnPlayer();
+      continue;
+    }
+    
+    const tx = Math.floor(p.x / TILE_SIZE);
+    const ty = Math.floor(p.y / TILE_SIZE);
+    if (tx >= 0 && tx < WORLD_WIDTH && ty >= 0 && ty < WORLD_HEIGHT) {
+      const tile = terrain[tx][ty];
+      if (tile && tile.solid) {
+        alienProjectiles.splice(i, 1);
+        continue;
+      }
+    }
+    
+    if (p.life <= 0) {
+      alienProjectiles.splice(i, 1);
+    }
+  }
+}
+
+function spawnAlienDrops(x, y) {
+  const pixelCount = 2 + Math.floor(Math.random() * 4);
+  for (let i = 0; i < pixelCount; i++) {
+    pickups.push({
+      x: x + (Math.random() - 0.5) * 20,
+      y: y,
+      vx: (Math.random() - 0.5) * 100,
+      vy: -50 - Math.random() * 100,
+      type: 'pixel',
+      life: 10
+    });
+  }
+  if (Math.random() < 0.3) {
+    pickups.push({
+      x: x,
+      y: y,
+      vx: (Math.random() - 0.5) * 50,
+      vy: -50 - Math.random() * 50,
+      type: 'ammo',
+      life: 10
+    });
+  }
+}
+
+function checkProjectileAlienCollision(p) {
+  for (let i = aliens.length - 1; i >= 0; i--) {
+    const a = aliens[i];
+    if (p.x >= a.x && p.x <= a.x + a.width &&
+        p.y >= a.y && p.y <= a.y + a.height) {
+      a.hp -= p.damage;
+      return true;
+    }
+  }
+  return false;
+}
+
+function drawAliens() {
+  for (const a of aliens) {
+    const screenX = a.x - camera.x;
+    const screenY = a.y - camera.y;
+    
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(screenX, screenY, a.width, a.height);
+    
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(screenX + 3, screenY + 4, 3, 3);
+    ctx.fillRect(screenX + 10, screenY + 4, 3, 3);
+    
+    const barWidth = a.width;
+    const barHeight = 3;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(screenX, screenY - 6, barWidth, barHeight);
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(screenX, screenY - 6, (a.hp / a.maxHp) * barWidth, barHeight);
+  }
+}
+
+function drawTerrain() {
+  const startX = Math.floor(camera.x / TILE_SIZE);
+  const endX = Math.min(WORLD_WIDTH, Math.ceil((camera.x + canvas.width) / TILE_SIZE));
+  const startY = Math.floor(camera.y / TILE_SIZE);
+  const endY = Math.min(WORLD_HEIGHT, Math.ceil((camera.y + canvas.height) / TILE_SIZE));
+
+  for (let tx = startX; tx < endX; tx++) {
+    for (let ty = startY; ty < endY; ty++) {
+      const tile = terrain[tx][ty];
+      if (tile && tile.solid) {
+        const screenX = tx * TILE_SIZE - camera.x;
+        const screenY = ty * TILE_SIZE - camera.y;
+        
+        switch (tile.type) {
+          case 'grass':
+            ctx.fillStyle = '#00FF41';
+            break;
+          case 'dirt':
+            ctx.fillStyle = '#5C4033';
+            break;
+          case 'stone':
+            ctx.fillStyle = '#DCDBA0';
+            break;
+          case 'bedrock':
+            ctx.fillStyle = '#0A0A0A';
+            break;
+          default:
+            ctx.fillStyle = '#5d4037';
+        }
+        ctx.fillRect(screenX, screenY, TILE_SIZE, TILE_SIZE);
+        
+        ctx.strokeStyle = '#1b1b1b';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(screenX, screenY, TILE_SIZE, TILE_SIZE);
+      }
+    }
+  }
+}
+
+function drawPlayer() {
+  const screenX = player.x - camera.x;
+  const screenY = player.y - camera.y;
+  
+  ctx.fillStyle = '#4fc3f7';
+  ctx.fillRect(screenX, screenY, player.width, player.height);
+  
+  ctx.fillStyle = '#1a1a2e';
+  const eyeX = player.facingRight ? screenX + 11 : screenX + 4;
+  ctx.fillRect(eyeX, screenY + 6, 3, 3);
+  
+  ctx.fillStyle = '#e0e0e0';
+  const gunX = player.facingRight ? screenX + player.width : screenX - 8;
+  ctx.fillRect(gunX, screenY + 10, 8, 3);
+}
+
+function drawAimLine() {
+  const screenX = player.x - camera.x + player.width / 2;
+  const screenY = player.y - camera.y + player.height / 2;
+  
+  const aimEndX = screenX + aimAngle.x * 300;
+  const aimEndY = screenY + aimAngle.y * 300;
+  
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath();
+  ctx.moveTo(screenX, screenY);
+  ctx.lineTo(aimEndX, aimEndY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawProjectiles() {
+  for (const p of projectiles) {
+    const screenX = p.x - camera.x;
+    const screenY = p.y - camera.y;
+    
+    ctx.fillStyle = p.isPixel ? '#ffeb3b' : '#fff';
+    ctx.fillRect(screenX - 2, screenY - 2, 4, 4);
+  }
+}
+
+function drawPickups() {
+  for (const p of pickups) {
+    const screenX = p.x - camera.x;
+    const screenY = p.y - camera.y;
+    
+    if (p.type === 'pixel') {
+      ctx.fillStyle = '#ffeb3b';
+    } else {
+      ctx.fillStyle = '#ff9800';
+    }
+    ctx.fillRect(screenX - 4, screenY - 4, 8, 8);
+    
+    ctx.fillStyle = '#fff';
+    ctx.font = '8px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(p.type === 'pixel' ? 'P' : 'A', screenX, screenY + 3);
+  }
+}
+
+function drawHUD() {
+  ctx.fillStyle = '#e0e0e0';
+  ctx.font = '16px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('Asktro', 20, 30);
+  
+  ctx.textAlign = 'right';
+  ctx.fillText(`Ammo: ${player.ammo}  Pixels: ${player.pixels}  HP: ${player.hp}/${player.maxHp}`, canvas.width - 20, 30);
+  
+  const barWidth = 150;
+  const barHeight = 12;
+  const barX = canvas.width - 20 - barWidth;
+  const barY = 40;
+  
+  ctx.fillStyle = '#333';
+  ctx.fillRect(barX, barY, barWidth, barHeight);
+  
+  ctx.fillStyle = player.hp > 30 ? '#4caf50' : '#f44336';
+  ctx.fillRect(barX, barY, (player.hp / player.maxHp) * barWidth, barHeight);
+  
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barWidth, barHeight);
+  
+  const selectorWidth = 120;
+  const selectorHeight = 24;
+  const selectorX = canvas.width - 20 - selectorWidth;
+  const selectorY = 60;
+  
+  ctx.fillStyle = '#222';
+  ctx.fillRect(selectorX, selectorY, selectorWidth, selectorHeight);
+  
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(selectorX, selectorY, selectorWidth, selectorHeight);
+  
+  const halfWidth = selectorWidth / 2;
+  if (player.usePixels) {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(selectorX + halfWidth, selectorY, halfWidth, selectorHeight);
+  } else {
+    ctx.fillStyle = '#333';
+    ctx.fillRect(selectorX, selectorY, halfWidth, selectorHeight);
+  }
+  
+  ctx.fillStyle = player.usePixels ? '#888' : '#ffeb3b';
+  ctx.font = '12px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('AMMO', selectorX + halfWidth / 2, selectorY + 16);
+  
+  ctx.fillStyle = player.usePixels ? '#ffeb3b' : '#888';
+  ctx.fillText('PIXELS', selectorX + halfWidth + halfWidth / 2, selectorY + 16);
+  
+  const modeY = selectorY + selectorHeight + 10;
+  ctx.fillStyle = freeCam ? '#ff4444' : '#44ff44';
+  ctx.font = '14px "Courier New", monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(freeCam ? 'FREECAM [G]' : 'ACTION [F]', canvas.width - 20, modeY + 14);
+  
+  ctx.fillStyle = '#333';
+  ctx.fillRect(canvas.width - 100, modeY, 80, 18);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(canvas.width - 100, modeY, 80, 18);
+  ctx.fillStyle = freeCam ? '#ff4444' : '#44ff44';
+  ctx.font = '11px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(freeCam ? 'FREECAM' : 'ACTION', canvas.width - 60, modeY + 13);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  ctx.fillStyle = '#000033';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  
+  drawTerrain();
+  drawPickups();
+  drawProjectiles();
+  drawAliens();
+  drawPlayer();
+  drawAimLine();
+  drawHUD();
+}
+
+generateTerrain();
+spawnAliens();
+
+let lastTime = 0;
+function loop(timestamp) {
+  const dt = (timestamp - lastTime) / 1000;
+  lastTime = timestamp;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
+  if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Space') keys.up = true;
+  if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = true;
+  if (e.code === 'KeyK') player.usePixels = false;
+  if (e.code === 'KeyL') player.usePixels = true;
+  if (e.code === 'KeyF') freeCam = true;
+  if (e.code === 'KeyG') freeCam = false;
+});
+
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+  if (e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Space') keys.up = false;
+  if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = false;
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - rect.left;
+  mouse.y = e.clientY - rect.top;
+  
+  if (pointerLocked) {
+    mouse.movementX = e.movementX;
+    mouse.movementY = e.movementY;
+    
+    if (freeCam) {
+      lookOffset.x = Math.max(-500, Math.min(500, lookOffset.x + e.movementX * 0.5));
+      lookOffset.y = Math.max(-500, Math.min(500, lookOffset.y + e.movementY * 0.5));
+    }
+  }
+});
+
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button === 0) {
+    mouse.down = true;
+    const wasLocked = pointerLocked;
+    if (!pointerLocked) {
+      canvas.requestPointerLock();
+    }
+    if (!wasLocked) {
+      mouse.wasDown = true;
+    }
+  }
+});
+
+canvas.addEventListener('mouseup', (e) => {
+  if (e.button === 0) {
+    mouse.down = false;
+    mouse.wasDown = false;
+  }
+});
+
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = document.pointerLockElement === canvas;
+  if (!pointerLocked) {
+    lookOffset.x = 0;
+    lookOffset.y = 0;
+    aimAngle.x = player.facingRight ? 1 : -1;
+    aimAngle.y = 0;
+  }
+});
+
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());</script>
+
+</body></html>
